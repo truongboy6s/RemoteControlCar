@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const esp32Service = require('../services/esp32Service');
 const webSocketService = require('../services/websocketService');
+const ipDiscoveryService = require('../services/ipDiscoveryService');
 const { HTTP_STATUS, COMMANDS } = require('../config/constants');
 const { authenticateToken } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/admin');
@@ -9,25 +10,111 @@ const { requireAdmin } = require('../middleware/admin');
 // ESP32 status (no auth required for ESP32)
 router.get('/status', async (req, res) => {
   try {
-    const webSocketService = require('../services/websocketService');
-    const wsStatus = webSocketService.getESP32Status();
-    const status = esp32Service.getConnectionStatus();
-    
+    const status = webSocketService.getESP32Status();
     res.status(HTTP_STATUS.OK).json({
       success: true,
-      ...status,
-      websocket: wsStatus,
-      esp32Online: wsStatus.connected && wsStatus.count > 0,
-      message: wsStatus.connected && wsStatus.count > 0 ? 
-               'ESP32 Car đang kết nối' : 
-               'ESP32 Car offline'
+      data: {
+        connected: status.connected,
+        count: status.count,
+        devices: status.devices,
+        message: status.connected ? 'ESP32 Car Online' : 'ESP32 Car Offline',
+        lastUpdate: status.timestamp
+      }
     });
   } catch (error) {
     res.status(HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      error: error.message,
-      esp32Online: false,
-      message: 'ESP32 Car offline'
+      message: 'Failed to get ESP32 status',
+      error: error.message
+    });
+  }
+});
+
+// Health check endpoint (no auth required)
+router.get('/health', (req, res) => {
+  try {
+    const health = webSocketService.getHealthStatus();
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      health,
+      message: 'WebSocket service healthy'
+    });
+  } catch (error) {
+    res.status(HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: 'WebSocket service unhealthy',
+      error: error.message
+    });
+  }
+});
+
+// Ping ESP32 clients (no auth required for testing)
+router.post('/ping', (req, res) => {
+  try {
+    console.log('🏓 Manual ping request received');
+    const activeClients = webSocketService.pingESP32Clients();
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      activeClients,
+      message: `Pinged ${activeClients} ESP32 client(s)`
+    });
+  } catch (error) {
+    res.status(HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: 'Failed to ping ESP32 clients',
+      error: error.message
+    });
+  }
+});
+
+// Network discovery endpoint for ESP32 (no auth required)
+router.get('/network/discover', (req, res) => {
+  try {
+    const networkInfo = ipDiscoveryService.getNetworkInfo();
+    const ipRanges = ipDiscoveryService.getIPRangesForESP32();
+    
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      currentIP: networkInfo.currentIP,
+      serverPorts: [3000, 3001],
+      ipRanges: ipRanges,
+      allIPs: networkInfo.allIPs.map(ip => ({
+        ip: ip.ip,
+        interface: ip.interface,
+        isHotspot: ip.isHotspot
+      })),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: 'Failed to get network info',
+      error: error.message
+    });
+  }
+});
+
+// IP broadcast endpoint for ESP32 discovery
+router.get('/network/broadcast', (req, res) => {
+  try {
+    const networkInfo = ipDiscoveryService.getNetworkInfo();
+    
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      message: 'Backend server found',
+      serverIP: networkInfo.currentIP,
+      serverPorts: {
+        http: 3000,
+        websocket: 3001
+      },
+      websocketURL: `ws://${networkInfo.currentIP}:3001`,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: 'Network info unavailable',
+      error: error.message
     });
   }
 });

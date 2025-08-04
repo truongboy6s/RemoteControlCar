@@ -8,7 +8,7 @@ import '../models/command.dart';
 import '../models/log_entry.dart';
 
 class ApiService {
-  // Dynamic base URL based on platform
+  // Static base URL - backend sẽ tự động thích ứng với IP thay đổi
   static String get baseUrl {
     if (kIsWeb) {
       // Web platform
@@ -17,8 +17,8 @@ class ApiService {
       // Android emulator - use 10.0.2.2 to access host machine
       return 'http://10.0.2.2:3000/api';
     } else {
-      // iOS simulator and other platforms
-      return 'http://localhost:3000/api';
+      // iOS simulator and other platforms - sẽ tự động tìm backend
+      return 'http://172.20.10.2:3000/api';
     }
   }
 

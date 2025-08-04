@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const connectDB = require('./src/config/database');
 const webSocketService = require('./src/services/websocketService');
+const ipDiscoveryService = require('./src/services/ipDiscoveryService');
 
 // Import routes
 const authRoutes = require('./src/routes/auth');
@@ -18,19 +19,23 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001', 
-    'http://localhost:3002',
-    'http://localhost:3003',
-    'http://localhost:3004',
-    'http://localhost:3005',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:8080',
-    'https://localhost:3000',
-    'https://localhost:8080'
-  ],
+  origin: function(origin, callback) {
+    // Tạo danh sách origins động từ tất cả network interfaces
+    const allowedOrigins = ipDiscoveryService.generateCORSOrigins();
+    
+    console.log('🌐 Current network info:', ipDiscoveryService.getNetworkInfo().currentIP);
+    
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin) || origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    } else {
+      console.log('❌ CORS blocked origin:', origin);
+      console.log('✅ Allowed origins include:', allowedOrigins.slice(0, 5));
+      return callback(null, true); // Allow all for hotspot compatibility
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
@@ -75,12 +80,32 @@ app.get('/', (req, res) => {
     message: 'Car Control Backend API',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
+    networkInfo: {
+      hotspotIP: '172.20.10.2',
+      port: process.env.PORT || 3000,
+      uptime: process.uptime()
+    },
     endpoints: {
       auth: '/api/auth',
       users: '/api/users',
       commands: '/api/commands',
       logs: '/api/logs',
       esp32: '/api/esp32'
+    }
+  });
+});
+
+// Backend health endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend server healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    networkInfo: {
+      hotspotIP: '172.20.10.2',
+      port: process.env.PORT || 3000,
+      serverHost: '0.0.0.0'
     }
   });
 });

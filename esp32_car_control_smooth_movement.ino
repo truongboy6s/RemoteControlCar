@@ -2,14 +2,25 @@
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
 #include <WebSocketsClient.h>
+#include <HTTPClient.h>
 
 // WiFi credentials
 const char* ssid = "TruongVu";
 const char* password = "20042006";
 
-// Backend server configuration
-const char* websocket_server = "192.168.1.101";
+// Backend server configuration - DYNAMIC IP DISCOVERY
+String websocket_server = "172.20.10.2"; // Default hotspot IP
 const int websocket_port = 3001;
+const int backend_port = 3000;
+
+// Common hotspot IP ranges to scan
+const String IP_RANGES[] = {
+  "172.20.10",    // iPhone hotspot
+  "192.168.43",   // Android hotspot  
+  "192.168.137",  // Windows hotspot
+  "192.168.1"     // Home WiFi
+};
+const int NUM_RANGES = 4;
 
 // Hardware pins
 #define trigPin 5
@@ -33,18 +44,21 @@ unsigned long lastHeartbeat = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastActivity = 0;
 bool isConnected = false;
+unsigned long lastDiscovery = 0;
+bool serverFound = false;
 
 // Timing intervals
 const unsigned long SENSOR_INTERVAL = 2000;    // 2 seconds
 const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 seconds
 const unsigned long AUTO_SENSOR_INTERVAL = 100; // 0.1 seconds in auto mode - FAST response
+const unsigned long DISCOVERY_INTERVAL = 60000; // 60 seconds - periodic backend discovery
 
 // Motor speed - MAXIMUM POWER FOR GROUND MOVEMENT
 const int MOTOR_SPEED = 255; // MAXIMUM speed for better movement on ground
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n=== ESP32 Car Control - Fixed Motor Movement ===");
+  Serial.println("\n=== ESP32 Car Control - Auto Backend Discovery ===");
 
   // Initialize hardware pins
   setupHardware();
@@ -52,10 +66,13 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
 
+  // Discover backend server
+  discoverBackendServer();
+
   // Setup WebSocket connection
   setupWebSocket();
 
-  Serial.println("🚗 ESP32 Car Ready!");
+  Serial.println("🚗 ESP32 Car Ready with Auto Discovery!");
   lastActivity = millis();
 }
 
@@ -106,7 +123,7 @@ void setupWiFi() {
 }
 
 void setupWebSocket() {
-  Serial.println("🔌 Connecting to WebSocket: ws://" + String(websocket_server) + ":" + String(websocket_port));
+  Serial.println("🔌 Connecting to WebSocket: ws://" + websocket_server + ":" + String(websocket_port));
   webSocket.begin(websocket_server, websocket_port, "/");
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
@@ -454,6 +471,100 @@ void sendHeartbeat() {
   webSocket.sendTXT(message);
 }
 
+// ===== BACKEND DISCOVERY FUNCTIONS =====
+bool testBackendConnection(String ip) {
+  HTTPClient http;
+  http.begin("http://" + ip + ":" + String(backend_port) + "/api/esp32/network/broadcast");
+  http.setTimeout(2000); // 2 second timeout
+  
+  Serial.println("🔍 Testing: " + ip + ":" + String(backend_port));
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    Serial.println("✅ Response: " + response);
+    
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (!error && doc["success"] == true) {
+      Serial.println("✅ Backend found at: " + ip);
+      http.end();
+      return true;
+    }
+  }
+  
+  http.end();
+  return false;
+}
+
+bool discoverBackendServer() {
+  Serial.println("🔍 Starting backend server discovery...");
+  
+  // Get device's own IP to determine subnet
+  String deviceIP = WiFi.localIP().toString();
+  Serial.println("📱 Device IP: " + deviceIP);
+  
+  // Extract subnet from device IP (first 3 octets)
+  int lastDot = deviceIP.lastIndexOf('.');
+  if (lastDot > 0) {
+    String deviceSubnet = deviceIP.substring(0, lastDot);
+    Serial.println("🔍 Scanning device subnet: " + deviceSubnet + ".x");
+    
+    // First, scan device's own subnet
+    for (int ip = 1; ip <= 10; ip++) {
+      String testIP = deviceSubnet + "." + String(ip);
+      if (testIP != deviceIP && testBackendConnection(testIP)) {
+        websocket_server = testIP;
+        serverFound = true;
+        Serial.println("✅ Backend discovered in same subnet: " + testIP);
+        return true;
+      }
+      delay(100); // Small delay between requests
+    }
+  }
+  
+  // If not found in device subnet, scan common hotspot ranges
+  for (int range = 0; range < NUM_RANGES; range++) {
+    String baseIP = IP_RANGES[range];
+    Serial.println("🔍 Scanning range: " + baseIP + ".x");
+    
+    for (int ip = 1; ip <= 10; ip++) {
+      String testIP = baseIP + "." + String(ip);
+      
+      if (testBackendConnection(testIP)) {
+        websocket_server = testIP;
+        serverFound = true;
+        Serial.println("✅ Backend discovered: " + testIP);
+        return true;
+      }
+      delay(100); // Small delay between requests
+    }
+  }
+  
+  Serial.println("❌ No backend server found in any range");
+  serverFound = false;
+  return false;
+}
+
+void reconnectToBackend() {
+  Serial.println("🔄 Reconnecting to backend...");
+  
+  // Close current WebSocket connection
+  webSocket.disconnect();
+  delay(1000);
+  
+  // Discover new backend server
+  if (discoverBackendServer()) {
+    // Reconnect WebSocket with new server
+    setupWebSocket();
+    Serial.println("🔄 Reconnected to new backend: " + websocket_server);
+  } else {
+    Serial.println("❌ Failed to reconnect - no backend found");
+  }
+}
+
 void handleSerialCommand() {
   String command = Serial.readString();
   command.trim();
@@ -706,6 +817,24 @@ void handleSerialCommand() {
     Serial.println("Back to center: 90°");
     
     Serial.println("SERVO DEBUG COMPLETE");
+  } else if (command == "discover") {
+    Serial.println("🔍 Manual backend discovery...");
+    if (discoverBackendServer()) {
+      Serial.println("✅ Discovery successful: " + websocket_server);
+      reconnectToBackend();
+    } else {
+      Serial.println("❌ Discovery failed");
+    }
+  } else if (command == "reconnect") {
+    Serial.println("🔄 Manual reconnect...");
+    reconnectToBackend();
+  } else if (command == "server_info") {
+    Serial.println("📡 Current server info:");
+    Serial.println("   WebSocket Server: " + websocket_server);
+    Serial.println("   WebSocket Port: " + String(websocket_port));
+    Serial.println("   Backend Port: " + String(backend_port));
+    Serial.println("   Server Found: " + String(serverFound ? "YES" : "NO"));
+    Serial.println("   Connected: " + String(isConnected ? "YES" : "NO"));
   } else {
     executeCommand(command);
   }
@@ -720,8 +849,24 @@ void loop() {
     return;
   }
   
+  // Periodic backend discovery (every 60 seconds)
+  if (millis() - lastDiscovery > DISCOVERY_INTERVAL) {
+    if (!isConnected && !serverFound) {
+      Serial.println("🔍 Periodic backend discovery...");
+      discoverBackendServer();
+    }
+    lastDiscovery = millis();
+  }
+  
   // Handle WebSocket
   webSocket.loop();
+  
+  // Auto reconnect if connection lost and server was found before
+  if (!isConnected && serverFound && (millis() - lastActivity > 30000)) {
+    Serial.println("🔄 Connection lost, trying to reconnect...");
+    reconnectToBackend();
+    lastActivity = millis();
+  }
   
   // Auto obstacle avoidance - RUN CONTINUOUSLY when enabled
   if (autoMode) {

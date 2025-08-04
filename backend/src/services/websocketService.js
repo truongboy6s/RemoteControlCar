@@ -37,8 +37,11 @@ class WebSocketService {
 
       this.isInitialized = true;
       console.log('✅ WebSocket service initialized successfully');
-      console.log('📱 Socket.IO server: ws://localhost:3000');
-      console.log('🤖 Raw WebSocket server: ws://localhost:3001');
+      console.log('📱 Socket.IO server: ws://0.0.0.0:3000');
+      console.log('🤖 Raw WebSocket server: ws://0.0.0.0:3001');
+      console.log('🌐 Hotspot access:');
+      console.log('   - Socket.IO: ws://172.20.10.2:3000');
+      console.log('   - WebSocket: ws://172.20.10.2:3001');
     } catch (error) {
       console.error('❌ Error initializing WebSocket service:', error);
       throw error;
@@ -49,17 +52,22 @@ class WebSocketService {
     try {
       this.wss = new WebSocket.Server({
         port: 3001,
+        host: '0.0.0.0',
         perMessageDeflate: false,
         clientTracking: true
       });
+      console.log('🔌 ESP32 WebSocket server listening on 0.0.0.0:3001');
+      console.log('📱 Accessible from hotspot: ws://172.20.10.2:3001');
     } catch (error) {
       if (error.code === 'EADDRINUSE') {
         console.log('Port 3001 in use, trying 3002...');
         this.wss = new WebSocket.Server({
           port: 3002,
+          host: '0.0.0.0',
           perMessageDeflate: false,
           clientTracking: true
         });
+        console.log('🔌 ESP32 WebSocket server listening on 0.0.0.0:3002');
       } else {
         throw error;
       }
@@ -133,20 +141,31 @@ class WebSocketService {
     this.wss.on('connection', (ws, req) => {
       const clientId = `esp32_${Date.now()}`;
       const clientIP = req.socket.remoteAddress;
-      console.log(`🤖✅ ESP32 WebSocket connected: ${clientId} from ${clientIP}`);
+      const userAgent = req.headers['user-agent'];
+      
+      console.log(`🤖✅ ESP32 WebSocket connected: ${clientId}`);
+      console.log(`   IP: ${clientIP}`);
+      console.log(`   User-Agent: ${userAgent || 'Unknown'}`);
+      console.log(`   Connection time: ${new Date().toLocaleString()}`);
 
       this.esp32Clients.set(clientId, {
         socket: ws,
         connectedAt: new Date(),
         type: 'esp32',
         ip: clientIP,
-        lastHeartbeat: new Date()
+        lastHeartbeat: new Date(),
+        userAgent: userAgent
       });
 
       ws.send(JSON.stringify({
         type: 'connection_confirmed',
         clientId: clientId,
-        serverTime: new Date().toISOString()
+        serverTime: new Date().toISOString(),
+        serverIP: '172.20.10.2',
+        networkInfo: {
+          clientIP: clientIP,
+          serverPort: 3001
+        }
       }));
 
       ws.on('message', (message) => {
@@ -154,6 +173,13 @@ class WebSocketService {
           const data = JSON.parse(message.toString());
           const client = this.esp32Clients.get(clientId);
           if (client) client.lastHeartbeat = new Date();
+
+          // Log important messages
+          if (data.type === 'device_info') {
+            console.log(`🤖📋 ESP32 Device Info: ${JSON.stringify(data, null, 2)}`);
+          } else if (data.type === 'sensor') {
+            console.log(`🤖📊 Sensor Data - Distance: ${data.data?.distance}cm, Mode: ${data.data?.mode}`);
+          }
 
           switch (data.type) {
             case 'device_info':
@@ -179,6 +205,7 @@ class WebSocketService {
               this.broadcastToFlutter('battery_data', this.lastBatteryData);
               break;
             case 'command_status':
+              console.log(`🤖✅ Command executed: ${data.command} - ${data.status}`);
               this.broadcastToFlutter('command_status', {
                 ...data,
                 clientId,
@@ -186,6 +213,7 @@ class WebSocketService {
               });
               break;
             case 'heartbeat':
+              // Don't log heartbeat to reduce noise
               this.broadcastToFlutter('esp32_heartbeat', {
                 ...data,
                 clientId,
@@ -193,7 +221,7 @@ class WebSocketService {
               });
               break;
             case 'mode_change':
-              console.log(`🤖 ESP32 mode changed to: ${data.mode}`);
+              console.log(`🤖🔄 ESP32 mode changed to: ${data.mode}`);
               this.broadcastToFlutter('mode_change', {
                 ...data,
                 clientId,
@@ -201,6 +229,7 @@ class WebSocketService {
               });
               break;
             case 'error':
+              console.error(`🤖❌ ESP32 Error: ${data.message}`);
               this.broadcastToFlutter('esp32_error', {
                 ...data,
                 clientId,
@@ -208,6 +237,7 @@ class WebSocketService {
               });
               break;
             case 'log':
+              console.log(`🤖📝 ESP32 Log: ${data.message}`);
               this.broadcastToFlutter('esp32_log', {
                 ...data,
                 clientId,
@@ -224,25 +254,21 @@ class WebSocketService {
       ws.on('close', () => {
         console.log(`🤖❌ ESP32 WebSocket disconnected: ${clientId}`);
         this.esp32Clients.delete(clientId);
-
-        // Broadcast ESP32 disconnection to all Flutter clients
         this.broadcastToFlutter('esp32_disconnected', {
           device: 'ESP32_Car',
           clientId,
           disconnectedAt: new Date().toISOString(),
-          status: 'offline',
           message: 'ESP32 Car đã mất kết nối'
         });
-
-        // Send updated ESP32 status to all clients
-        this.broadcastESP32Status();
       });
 
       ws.on('error', (error) => {
+        console.error(`🤖❌ ESP32 WebSocket error (${clientId}):`, error);
         this.broadcastToFlutter('esp32_error', {
           type: 'connection_error',
           error: error.message,
-          clientId
+          clientId,
+          message: 'Lỗi kết nối ESP32'
         });
       });
     });
@@ -259,17 +285,28 @@ class WebSocketService {
     let sent = false;
     let sentCount = 0;
 
+    console.log(`📨 Sending command to ESP32: ${action}`);
+
     this.esp32Clients.forEach((client, clientId) => {
       if (client.socket.readyState === WebSocket.OPEN) {
         try {
           client.socket.send(JSON.stringify(command));
           sent = true;
           sentCount++;
+          console.log(`✅ Command sent to ESP32 (${clientId}): ${action}`);
         } catch (error) {
           console.error(`❌ Error sending command to ESP32 (${clientId}):`, error);
         }
+      } else {
+        console.warn(`⚠️ ESP32 (${clientId}) not ready - ReadyState: ${client.socket.readyState}`);
       }
     });
+
+    if (sentCount === 0) {
+      console.warn('⚠️ No ESP32 clients connected to receive command');
+    } else {
+      console.log(`✅ Command sent to ${sentCount} ESP32 client(s)`);
+    }
 
     return sent;
   }
@@ -302,61 +339,19 @@ class WebSocketService {
     this.broadcastToFlutter('notification', notification);
   }
 
-  // Broadcast ESP32 status to all clients
-  broadcastESP32Status() {
-    const status = this.getESP32Status();
-    this.broadcastToFlutter('esp32_status', status);
-  }
-
   startSensorDataBroadcast() {
     if (this.sensorInterval) clearInterval(this.sensorInterval);
 
     this.sensorInterval = setInterval(() => {
       if (this.connectedClients.size > 0) {
         const status = this.getESP32Status();
-        
-        // Broadcast ESP32 status every 3 seconds
         this.broadcastToFlutter('esp32_status', status);
 
-        // Request battery data every 30 seconds
         if (Date.now() % 30000 < 3000) {
           this.sendCommandToESP32('get_battery');
         }
-        
-        // Check for dead ESP32 connections and clean them up
-        this.cleanupDeadConnections();
       }
     }, 3000);
-  }
-
-  // Clean up dead ESP32 connections
-  cleanupDeadConnections() {
-    const now = Date.now();
-    const HEARTBEAT_TIMEOUT = 60000; // 60 seconds
-
-    this.esp32Clients.forEach((client, clientId) => {
-      if (client.lastHeartbeat && (now - client.lastHeartbeat.getTime()) > HEARTBEAT_TIMEOUT) {
-        console.log(`🤖💀 ESP32 connection timeout: ${clientId}`);
-        
-        // Close the connection
-        if (client.socket.readyState === WebSocket.OPEN) {
-          client.socket.terminate();
-        }
-        
-        // Remove from clients
-        this.esp32Clients.delete(clientId);
-        
-        // Broadcast disconnection
-        this.broadcastToFlutter('esp32_disconnected', {
-          device: 'ESP32_Car',
-          clientId,
-          disconnectedAt: new Date().toISOString(),
-          status: 'offline',
-          message: 'ESP32 Car mất kết nối (timeout)',
-          reason: 'heartbeat_timeout'
-        });
-      }
-    });
   }
 
   sendESP32Status(socket) {
@@ -412,6 +407,49 @@ class WebSocketService {
       isInitialized: this.isInitialized,
       wsServerPort: this.wss?.options?.port || 'not started'
     };
+  }
+
+  getHealthStatus() {
+    return {
+      websocketService: {
+        initialized: this.isInitialized,
+        socketIOClients: this.connectedClients.size,
+        esp32Clients: this.esp32Clients.size,
+        wsServerPort: this.wss?.options?.port || 'not started',
+        uptime: process.uptime()
+      },
+      esp32Status: this.getESP32Status(),
+      batteryStatus: this.getBatteryStatus(),
+      networkInfo: {
+        serverHost: '0.0.0.0',
+        hotspotIP: '172.20.10.2',
+        socketIOPort: 3000,
+        webSocketPort: 3001
+      },
+      lastUpdate: new Date().toISOString()
+    };
+  }
+
+  pingESP32Clients() {
+    const pingMessage = {
+      type: 'ping',
+      timestamp: Date.now()
+    };
+
+    let activeClients = 0;
+    this.esp32Clients.forEach((client, clientId) => {
+      if (client.socket.readyState === WebSocket.OPEN) {
+        try {
+          client.socket.send(JSON.stringify(pingMessage));
+          activeClients++;
+        } catch (error) {
+          console.error(`❌ Failed to ping ESP32 (${clientId}):`, error);
+        }
+      }
+    });
+
+    console.log(`🏓 Pinged ${activeClients} ESP32 client(s)`);
+    return activeClients;
   }
 
   close() {
